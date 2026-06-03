@@ -1,0 +1,13 @@
+# Global owner for everything in the repository
+* @ankurdhuriya
+
+# Specific ownership for GitHub Actions and CI workflows
+/.github/workflows/    @ankurdhuriya
+
+# Configuration and dependency management
+/pyproject.toml        @ankurdhuriya
+/uv.lock               @ankurdhuriya
+/.python-version       @ankurdhuriya
+
+# Test suite configuration and files
+/tests/                @ankurdhuriya
