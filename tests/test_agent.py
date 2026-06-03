@@ -11,10 +11,10 @@ def test_environment_variables_are_present():
     Ensures that environment variables are loaded properly.
     This works locally via pytest-dotenv (.env) and in CI via GitHub Secrets.
     """
-    openai_key = os.getenv("OPENAI_API_KEY")
+    openai_key = os.getenv("GOOGLE_API_KEY")
     github_pat = os.getenv("GITHUB_PAT")
 
-    assert openai_key is not None, "OPENAI_API_KEY is missing from the environment"
+    assert openai_key is not None, "GOOGLE_API_KEY is missing from the environment"
     assert github_pat is not None, "GITHUB_PAT is missing from the environment"
 
     # Ensure they aren't empty strings
