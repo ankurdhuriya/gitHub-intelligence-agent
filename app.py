@@ -1,40 +1,72 @@
-# app.py
 import asyncio
-import os
-import sys
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent import build_agent
-
 load_dotenv()
 
-st.set_page_config(
-    page_title="GitHub Intelligence Agent", page_icon="🐙", layout="wide"
-)
+import observability  # noqa: E402, F401 — must run before langchain imports
 
-# -------------------------------------------------------------------
-# Sidebar Setup
-# -------------------------------------------------------------------
-with st.sidebar:
+observability.init_observability()
+
+from agent import (  # noqa: E402
+    build_agent,
+    get_required_credentials,
+    stream_agent_response,
+)
+from checkpointing import close_checkpointer, create_checkpointer  # noqa: E402
+
+PRESETS = [
+    "🔥 Top 5 repos by karpathy",
+    "🐛 Open issues in huggingface/transformers",
+    "🚀 What has Microsoft shipped on GitHub lately?",
+    "📈 Trending Python AI repos by stars",
+]
+STREAMLIT_THREAD_ID = "streamlit_session_thread"
+
+
+def _get_event_loop() -> asyncio.AbstractEventLoop:
+    """Keep one event loop per Streamlit session (asyncio.run closes it each call)."""
+    loop = st.session_state.get("event_loop")
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(close_checkpointer())
+        st.session_state.event_loop = loop
+        st.session_state.agent = None
+        st.session_state.checkpointer = None
+    return loop
+
+
+def _run_async(coro):
+    return _get_event_loop().run_until_complete(coro)
+
+
+def _init_session_state() -> None:
+    defaults = {
+        "messages": [],
+        "query_count": 0,
+        "tools_count": 0,
+        "agent": None,
+        "checkpointer": None,
+        "event_loop": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def render_sidebar() -> str | None:
     st.subheader("🐙 Session Stats")
     col1, col2 = st.columns(2)
-    col1.metric(label="Queries", value=st.session_state.get("query_count", 0))
-    col2.metric(label="Tools Used", value=st.session_state.get("tools_count", 0))
+    col1.metric(label="Queries", value=st.session_state.query_count)
+    col2.metric(label="Tools Used", value=st.session_state.tools_count)
 
     st.markdown("---")
     st.subheader("Quick queries")
 
-    presets = [
-        "🔥 Top 5 repos by karpathy",
-        "🐛 Open issues in huggingface/transformers",
-        "🚀 What has Microsoft shipped on GitHub lately?",
-        "📈 Trending Python AI repos by stars",
-    ]
-
     chosen_preset = None
-    for preset in presets:
+    for preset in PRESETS:
         if st.button(preset):
             chosen_preset = preset[2:]
 
@@ -43,141 +75,124 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# -------------------------------------------------------------------
-# App Interface Layout
-# -------------------------------------------------------------------
-st.title("🐙 GitHub Intelligence Agent")
+    return chosen_preset
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "query_count" not in st.session_state:
-    st.session_state.query_count = 0
-if "tools_count" not in st.session_state:
-    st.session_state.tools_count = 0
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+def render_message_history() -> None:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-user_query = st.chat_input("Ask anything about GitHub...")
-if chosen_preset:
-    user_query = chosen_preset
 
-if user_query:
+async def _get_or_create_checkpointer():
+    if st.session_state.checkpointer is not None:
+        return st.session_state.checkpointer
+
+    checkpointer = await create_checkpointer()
+    st.session_state.checkpointer = checkpointer
+    return checkpointer
+
+
+async def _get_or_create_agent():
+    if st.session_state.agent is not None:
+        return st.session_state.agent
+
+    github_pat, gemini_key = get_required_credentials()
+    checkpointer = await _get_or_create_checkpointer()
+    agent = await build_agent(
+        github_pat=github_pat,
+        gemini_api_key=gemini_key,
+        checkpointer=checkpointer,
+        streaming=True,
+    )
+    st.session_state.agent = agent
+    return agent
+
+
+async def _stream_response(
+    user_query: str, status_placeholder, response_placeholder
+) -> str:
+    status_placeholder.markdown("🔍 *Initializing connection to server...*")
+
+    try:
+        agent = await _get_or_create_agent()
+    except ValueError as e:
+        response_placeholder.error(str(e))
+        return ""
+    except Exception as e:
+        response_placeholder.error(f"Compilation failed: {e}")
+        return ""
+
+    accumulated = ""
+
+    def on_status(message: str) -> None:
+        if message:
+            status_placeholder.markdown(message)
+        else:
+            status_placeholder.empty()
+
+    def on_tool_start(_name: str) -> None:
+        st.session_state.tools_count += 1
+
+    def on_token(token: str) -> None:
+        nonlocal accumulated
+        accumulated += token
+        response_placeholder.markdown(accumulated + "▌")
+
+    try:
+        final_text = await stream_agent_response(
+            agent,
+            user_query,
+            thread_id=STREAMLIT_THREAD_ID,
+            on_status=on_status,
+            on_token=on_token,
+            on_tool_start=on_tool_start,
+        )
+    except Exception as e:
+        response_placeholder.error(f"Runtime streaming error: {e}")
+        return ""
+
+    response_placeholder.markdown(final_text)
+    return final_text
+
+
+def handle_user_query(user_query: str) -> None:
     st.session_state.query_count += 1
     st.session_state.messages.append({"role": "user", "content": user_query})
+
     with st.chat_message("user"):
         st.markdown(user_query)
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
         response_placeholder = st.empty()
+        final_text = _run_async(
+            _stream_response(user_query, status_placeholder, response_placeholder)
+        )
 
-        status_placeholder.markdown("🔍 *Initializing connection to server...*")
+    if final_text:
+        st.session_state.messages.append({"role": "assistant", "content": final_text})
+        st.rerun()
 
-        async def stream_agent():
-            github_pat = os.getenv("GITHUB_PAT")
-            gemini_key = os.getenv("GOOGLE_API_KEY")
 
-            print(f"\n[STDOUT DEBUG] --- New Query Triggered: '{user_query}' ---")
-            print(f"[STDOUT DEBUG] GITHUB_PAT Found: {bool(github_pat)}")
-            print(f"[STDOUT DEBUG] GOOGLE_API_KEY Found: {bool(gemini_key)}")
+def main() -> None:
+    st.set_page_config(
+        page_title="GitHub Intelligence Agent", page_icon="🐙", layout="wide"
+    )
+    _init_session_state()
 
-            if not github_pat or not gemini_key:
-                print("[STDOUT DEBUG] ERROR: Missing environment credentials!")
-                response_placeholder.error(
-                    "Error: Missing credentials inside .env file."
-                )
-                return ""
+    with st.sidebar:
+        chosen_preset = render_sidebar()
 
-            try:
-                print("[STDOUT DEBUG] Calling build_agent()...")
-                agent = await build_agent(
-                    github_pat=github_pat, gemini_api_key=gemini_key, streaming=True
-                )
-                print("[STDOUT DEBUG] build_agent() succeeded. Graph generated.")
-            except Exception as e:
-                print(f"[STDOUT DEBUG] FATAL EXCEPTION during compilation: {e}")
-                response_placeholder.error(f"Compilation Failed: {e}")
-                return ""
+    st.title("🐙 GitHub Intelligence Agent")
+    render_message_history()
 
-            inputs = {"messages": [("user", user_query)]}
-            config = {"configurable": {"thread_id": "streamlit_session_thread"}}
-            full_response = ""
+    user_query = st.chat_input("Ask anything about GitHub...")
+    if chosen_preset:
+        user_query = chosen_preset
 
-            try:
-                print("[STDOUT DEBUG] Invoking astream_events engine loop...")
-                async for event in agent.astream_events(inputs, config, version="v2"):
-                    kind = event["event"]
-                    name = event.get("name", "Unknown")
+    if user_query:
+        handle_user_query(user_query)
 
-                    # Print structural updates to terminal window to track progress
-                    print(
-                        f"[STDOUT DEBUG] Event received -> Kind: {kind} | Node Name: {name}"
-                    )
 
-                    if kind == "on_chat_model_start":
-                        print("[STDOUT DEBUG] Gemini LLM started thinking...")
-                        status_placeholder.empty()
-
-                    if kind == "on_tool_start":
-                        print(
-                            f"[STDOUT DEBUG] 🛠️ Executing GitHub MCP tool: {name} with inputs: {event['data'].get('input')}"
-                        )
-                        status_placeholder.markdown(
-                            f"🛠️ *Executing GitHub API Tool: `{name}`...*"
-                        )
-                        st.session_state.tools_count += 1
-
-                    if kind == "on_tool_end":
-                        print(f"[STDOUT DEBUG] ✅ Tool {name} finished execution.")
-                        status_placeholder.markdown("📝 *Processing tool results...*")
-
-                    if kind == "on_chat_model_stream":
-                        chunk = event["data"]["chunk"]
-                        text_found = ""
-
-                        # Debug text-extraction paths
-                        if hasattr(chunk, "content") and chunk.content:
-                            if isinstance(chunk.content, str):
-                                text_found = chunk.content
-                            elif isinstance(chunk.content, list):
-                                for part in chunk.content:
-                                    if (
-                                        isinstance(part, dict)
-                                        and part.get("type") == "text"
-                                    ):
-                                        text_found += part.get("text", "")
-                        elif isinstance(chunk, list):
-                            for part in chunk:
-                                if (
-                                    isinstance(part, dict)
-                                    and part.get("type") == "text"
-                                ):
-                                    text_found += part.get("text", "")
-
-                        if text_found:
-                            # Print raw tokens to stdout console as they arrive
-                            sys.stdout.write(text_found)
-                            sys.stdout.flush()
-
-                            full_response += text_found
-                            response_placeholder.markdown(full_response + "▌")
-
-                print(
-                    f"\n[STDOUT DEBUG] Execution cycle complete. Final response length: {len(full_response)}"
-                )
-            except Exception as e:
-                print(f"\n[STDOUT DEBUG] RUNTIME ERROR during stream execution: {e}")
-                response_placeholder.error(f"Runtime Streaming Error: {e}")
-
-            response_placeholder.markdown(full_response)
-            return full_response
-
-        final_text = asyncio.run(stream_agent())
-
-        if final_text:
-            st.session_state.messages.append(
-                {"role": "assistant", "content": final_text}
-            )
-            st.rerun()
+main()
