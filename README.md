@@ -2,6 +2,8 @@
 
 Research anything on GitHub through natural language. Ask questions in plain English; a LangGraph ReAct agent plans tool calls, queries GitHub via the official MCP server, and streams answers back—backed by Gemini, durable conversation state in Neon Postgres, and optional tracing in Arize AX.
 
+![GitHub Intelligence Agent UI](ui.png)
+
 ## Objective
 
 Build an **agentic GitHub research assistant** that:
