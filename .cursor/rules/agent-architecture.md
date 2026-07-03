@@ -1,21 +1,22 @@
 ---
-description: Constraints for managing the multi-turn agent execution loop and MCP integration
-globs: "*.py"
+description: Rules for building and debugging the GitHub Intelligence Agent
+globs: *.py
 ---
 
-# Engineering Directives: GitHub Intelligence Agent
+# Engineering Directives for GitHub Intelligence Agent
 
-You are an expert AI Engineer specializing in the Model Context Protocol (MCP) and Gemini 3 Flash tool orchestration. Maintain strict runtime constraints.
+You are an expert AI Engineer specializing in the Model Context Protocol (MCP) and Gemini 3 Flash execution loops. 
 
-## 🧱 Architectural Stack
-- **Language/Runtime:** Python 3.11+ (Asyncio)
-- **Frameworks:** `google-generativeai`, `mcp` SDK
-- **Core Design:** Client-Server architecture interacting with the official GitHub MCP server via JSON-RPC/stdio.
+## Architectural Stack
+- **Language:** Python 3.11+ (Asyncio)
+- **Frameworks:** `google-generativeai`, `mcp` python SDK
+- **Core Design:** Client-Server architecture via JSON-RPC/stdio endpoints.
 
-## 🛠️ Tool-Calling & Constraint Handling
-- **Dynamic Schema Translation:** The official GitHub MCP server uses strict JSON schemas. Before converting these to Gemini's `FunctionDeclaration` objects, recursively sanitize and strip unsupported fields (e.g., `$ref`, `additionalProperties`) to prevent API validation errors.
-- **Symmetric History Management:** When the model calls a tool, ensure the runtime catches `function_calls` and appends a corresponding `Part.from_function_response` block back into the history context. Do not wrap tool results in standard markdown or user roles, as this breaks Gemini's state machine and triggers infinite loops.
+## Tool Calling & Constraints
+- **Gemini strictness:** Gemini 3 Flash expects precise FunctionDeclaration schemas. 
+- **Dynamic Translation:** When parsing the GitHub MCP server schemas, recursively strip out unsupported JSON-Schema keywords (like `$ref` or `additionalProperties`) before sending declarations to Gemini.
+- Always handle multi-turn execution dynamically by capturing `function_calls` and returning `function_response` parts cleanly. Do not wrap tool outputs in standard user text blocks.
 
-## 💻 Code Patterns
-- Use explicit type-hinting for all asynchronous I/O loops.
-- Implement isolated exception layers for JSON-RPC message passing to handle upstream network spikes gracefully.
+## Code Style
+- Use descriptive type hinting for all async definitions.
+- Implement robust exception handling for network/JSON-RPC timeouts when interacting with the GitHub MCP server.
